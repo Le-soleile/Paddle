@@ -522,6 +522,20 @@ class TestStateDictHook(unittest.TestCase):
                 OrderedDict([("", {"version": 1}), ("child", {"version": 1})]),
             )
 
+    def test_state_dict_plain_dict_destination(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            destination = {}
+            state_dict = layer.state_dict(destination=destination)
+            self.assertIs(state_dict, destination)
+            self.assertIn("weight", state_dict)
+            self.assertFalse(hasattr(state_dict, "_metadata"))
+
     def test_load_state_dict_requires_mapping(self):
         with base.dygraph.guard():
             layer = paddle.nn.Layer()

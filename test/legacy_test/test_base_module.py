@@ -148,6 +148,23 @@ class TestAddModule(unittest.TestCase):
         self.assertIn('empty_module', self.module._modules)
         self.assertIsNone(self.module.empty_module)
 
+    def test_add_sublayer_error(self):
+        with self.assertRaises(TypeError):
+            self.module.add_sublayer('invalid', object())
+
+        with self.assertRaises(TypeError):
+            self.module.add_sublayer(1, nn.Linear(10, 5))
+
+        with self.assertRaises(KeyError):
+            self.module.add_sublayer('module.name', nn.Linear(10, 5))
+
+        with self.assertRaises(KeyError):
+            self.module.add_sublayer('', nn.Linear(10, 5))
+
+        self.module.existing_attr = object()
+        with self.assertRaises(KeyError):
+            self.module.add_sublayer('existing_attr', nn.Linear(10, 5))
+
     def test_add_module_hierarchy(self):
         child_module = SubModule()
         self.module.add_module('child', child_module)
