@@ -20,6 +20,7 @@ import typing
 import warnings
 import weakref
 from collections import OrderedDict, namedtuple
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 import numpy as np
@@ -64,7 +65,7 @@ from paddle.utils.decorator_utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from paddle._typing import DTypeLike, ParamAttrLike, PlaceLike, ShapeLike
     from paddle.nn.initializer import Initializer
@@ -2154,7 +2155,7 @@ class Layer:
     def backward(self, *inputs: Any) -> Any:
         raise ValueError("Layer shouldn't implement backward")
 
-    def add_sublayer(self, name: str, sublayer: Layer) -> Layer:
+    def add_sublayer(self, name: str, sublayer: Layer | None) -> Layer | None:
         """
 
         Adds a sub Layer instance.
@@ -2194,7 +2195,18 @@ class Layer:
                 0 Linear(in_features=10, out_features=3, dtype=float32)
                 1 Linear(in_features=3, out_features=10, dtype=float32)
         """
-        assert isinstance(sublayer, Layer) or sublayer is None
+        if not isinstance(sublayer, Layer) and sublayer is not None:
+            raise TypeError(
+                f"{paddle.typename(sublayer)} is not a Layer subclass"
+            )
+        if not isinstance(name, str):
+            raise TypeError(f"module name should be a string. Got {type(name)}")
+        if hasattr(self, name) and name not in self._sub_layers:
+            raise KeyError(f"attribute '{name}' already exists")
+        if "." in name:
+            raise KeyError(f'module name cannot contain ".", got: {name}')
+        if name == "":
+            raise KeyError('module name cannot be empty string ""')
 
         self._sub_layers[name] = sublayer
         return sublayer
@@ -2719,6 +2731,13 @@ class Layer:
 
         if destination is None:
             destination = OrderedDict()
+        if not hasattr(destination, '_metadata'):
+            try:
+                destination._metadata = OrderedDict()
+            except Exception:
+                pass
+        if hasattr(destination, '_metadata'):
+            destination._metadata[structured_name_prefix[:-1]] = {'version': 1}
         if use_hook:
             for state_dict_pre_hook in self._state_dict_pre_hooks.values():
                 state_dict_pre_hook(self, structured_name_prefix, keep_vars)
@@ -3126,6 +3145,9 @@ class Layer:
                 * ``unexpected_keys`` is a list of str containing the keys that are not
                     expected by this module but present in the provided ``state_dict``.
         """
+        if not isinstance(state_dict, Mapping):
+            raise TypeError("Expected state_dict to be dict-like")
+        metadata = getattr(state_dict, "_metadata", None)
         error_msgs: list[str] = []
         missing_keys: list[str] = []
         unexpected_keys: list[str] = []
@@ -3144,7 +3166,9 @@ class Layer:
                             "it should be done inplace."
                         )
             else:
-                local_metadata: dict[str, Any] = {}
+                local_metadata: dict[str, Any] = (
+                    {} if metadata is None else metadata.get(prefix[:-1], {})
+                )
                 for hook in layer._load_state_dict_pre_hooks.values():
                     hook(
                         layer,
@@ -3156,12 +3180,29 @@ class Layer:
                         unexpected_keys,
                         error_msgs,
                     )
+            if not is_post_hook:
+                for layer_name, layer_item in layer._sub_layers.items():
+                    if layer_item is not None:
+                        visit_load_state_dict_hooks(
+                            layer_item,
+                            prefix + layer_name + ".",
+                            is_post_hook,
+                        )
+
+        def visit_load_state_dict_post_hooks(layer, prefix):
             for layer_name, layer_item in layer._sub_layers.items():
                 if layer_item is not None:
-                    visit_load_state_dict_hooks(
-                        layer_item,
-                        prefix + layer_name + ".",
-                        is_post_hook,
+                    visit_load_state_dict_post_hooks(
+                        layer_item, prefix + layer_name + "."
+                    )
+            incompatible_keys = _IncompatibleKeys(missing_keys, unexpected_keys)
+            for hook in layer._load_state_dict_post_hooks.values():
+                hook_result = hook(layer, incompatible_keys)
+                if hook_result is not None:
+                    raise AssertionError(
+                        "Hooks registered with ``register_load_state_dict_post_hook`` are not"
+                        "expected to return new values, if incompatible_keys need to be modified,"
+                        "it should be done inplace."
                     )
 
         visit_load_state_dict_hooks(self, "")
@@ -3172,7 +3213,7 @@ class Layer:
         missing_keys.extend(load_missing_keys)
         unexpected_keys.extend(load_unexpected_keys)
 
-        visit_load_state_dict_hooks(self, "", is_post_hook=True)
+        visit_load_state_dict_post_hooks(self, "")
 
         if strict:
             if len(unexpected_keys) > 0:
