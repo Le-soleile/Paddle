@@ -21,7 +21,7 @@ import warnings
 import weakref
 from collections import OrderedDict, namedtuple
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
 
 import numpy as np
 from typing_extensions import Self, overload
@@ -85,6 +85,7 @@ _ForwardPostHook = Union[
     Callable[["Layer", Tensor, dict[str, Any], Tensor], Tensor],
 ]
 _StateDict = Union[dict[str, Tensor], typing.OrderedDict[str, Tensor]]
+_StateDictT = TypeVar("_StateDictT", bound=dict[str, Tensor])
 _StateDictHook = Callable[[_StateDict], None]
 
 _first_cap_re = re.compile('(.)([A-Z][a-z]+)')
@@ -2657,7 +2658,10 @@ class Layer:
         return hook_remove_helper
 
     def register_state_dict_post_hook(
-        self, hook: _StateDictHook
+        self,
+        hook: Callable[
+            [Layer, _StateDict, str, dict[str, Any]], _StateDict | None
+        ],
     ) -> HookRemoveHelper:
         return self.register_state_dict_hook(hook)
 
@@ -2825,18 +2829,52 @@ class Layer:
     @overload
     def state_dict(
         self,
-        destination: _StateDict | None = None,
-        include_sublayers: bool = True,
-        structured_name_prefix: str = "",
-        use_hook: bool = True,
-        keep_vars: bool = True,
+        destination: _StateDictT,
+        include_sublayers: bool = ...,
+        structured_name_prefix: str = ...,
+        use_hook: bool = ...,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: None = ...,
+        include_sublayers: bool = ...,
+        structured_name_prefix: str = ...,
+        use_hook: bool = ...,
+        keep_vars: bool = ...,
     ) -> _StateDict: ...
 
     @overload
     def state_dict(
         self,
+        destination: _StateDictT,
+        prefix: str,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: None,
+        prefix: str,
+        keep_vars: bool = ...,
+    ) -> _StateDict: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: _StateDictT,
         *,
-        destination: _StateDict,
+        prefix: str = ...,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        *,
         prefix: str = ...,
         keep_vars: bool = ...,
     ) -> _StateDict: ...
@@ -2845,13 +2883,18 @@ class Layer:
     def state_dict(
         self,
         *,
+        destination: _StateDictT,
         prefix: str = ...,
         keep_vars: bool = ...,
-    ) -> _StateDict: ...
+    ) -> _StateDictT: ...
 
     @overload
     def state_dict(
-        self, *args, destination=None, prefix="", keep_vars=False
+        self,
+        *,
+        destination: None = ...,
+        prefix: str = ...,
+        keep_vars: bool = ...,
     ) -> _StateDict: ...
 
     def state_dict(self, *args: Any, **kwargs: Any) -> _StateDict:
@@ -2898,7 +2941,7 @@ class Layer:
                 structured_name_prefix=kwargs.get('prefix', ""),
                 include_non_persistable_buffer=False,
                 use_hook=True,
-                keep_vars=kwargs.get('keep_vars', False),
+                keep_vars=kwargs.get('keep_vars', not in_dygraph_mode()),
             )
 
         return self._state_dict_impl(*args, **kwargs)
