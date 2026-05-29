@@ -2197,7 +2197,7 @@ class Layer:
         """
         if not isinstance(sublayer, Layer) and sublayer is not None:
             raise TypeError(
-                f"{paddle.typename(sublayer)} is not a Layer subclass"
+                f"{type(sublayer).__name__} is not a Layer subclass"
             )
         if not isinstance(name, str):
             raise TypeError(f"module name should be a string. Got {type(name)}")
