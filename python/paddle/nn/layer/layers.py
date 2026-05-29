@@ -3152,42 +3152,26 @@ class Layer:
         missing_keys: list[str] = []
         unexpected_keys: list[str] = []
 
-        def visit_load_state_dict_hooks(layer, prefix, is_post_hook=False):
-            if is_post_hook:
-                incompatible_keys = _IncompatibleKeys(
-                    missing_keys, unexpected_keys
+        def visit_load_state_dict_pre_hooks(layer, prefix):
+            local_metadata: dict[str, Any] = (
+                {} if metadata is None else metadata.get(prefix[:-1], {})
+            )
+            for hook in layer._load_state_dict_pre_hooks.values():
+                hook(
+                    layer,
+                    state_dict,
+                    prefix,
+                    local_metadata,
+                    strict,
+                    missing_keys,
+                    unexpected_keys,
+                    error_msgs,
                 )
-                for hook in layer._load_state_dict_post_hooks.values():
-                    hook_result = hook(layer, incompatible_keys)
-                    if hook_result is not None:
-                        raise AssertionError(
-                            "Hooks registered with ``register_load_state_dict_post_hook`` are not"
-                            "expected to return new values, if incompatible_keys need to be modified,"
-                            "it should be done inplace."
-                        )
-            else:
-                local_metadata: dict[str, Any] = (
-                    {} if metadata is None else metadata.get(prefix[:-1], {})
-                )
-                for hook in layer._load_state_dict_pre_hooks.values():
-                    hook(
-                        layer,
-                        state_dict,
-                        prefix,
-                        local_metadata,
-                        strict,
-                        missing_keys,
-                        unexpected_keys,
-                        error_msgs,
+            for layer_name, layer_item in layer._sub_layers.items():
+                if layer_item is not None:
+                    visit_load_state_dict_pre_hooks(
+                        layer_item, prefix + layer_name + "."
                     )
-            if not is_post_hook:
-                for layer_name, layer_item in layer._sub_layers.items():
-                    if layer_item is not None:
-                        visit_load_state_dict_hooks(
-                            layer_item,
-                            prefix + layer_name + ".",
-                            is_post_hook,
-                        )
 
         def visit_load_state_dict_post_hooks(layer, prefix):
             for layer_name, layer_item in layer._sub_layers.items():
@@ -3200,12 +3184,12 @@ class Layer:
                 hook_result = hook(layer, incompatible_keys)
                 if hook_result is not None:
                     raise AssertionError(
-                        "Hooks registered with ``register_load_state_dict_post_hook`` are not"
-                        "expected to return new values, if incompatible_keys need to be modified,"
+                        "Hooks registered with ``register_load_state_dict_post_hook`` are not "
+                        "expected to return new values, if incompatible_keys need to be modified, "
                         "it should be done inplace."
                     )
 
-        visit_load_state_dict_hooks(self, "")
+        visit_load_state_dict_pre_hooks(self, "")
 
         load_missing_keys, load_unexpected_keys = self.set_state_dict(
             state_dict, use_structured_name=True

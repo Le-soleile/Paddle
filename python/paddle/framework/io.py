@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 __all__ = []
 async_save_queue = []
+_STATE_DICT_METADATA_KEY = "__paddle_state_dict_metadata__"
 
 
 def clear_async_save_task_queue() -> None:
@@ -166,6 +167,9 @@ def async_save(
 def _build_saved_state_dict(state_dict):
     save_dict = {}
     name_table = {}
+    metadata = getattr(state_dict, "_metadata", None)
+    if metadata is not None:
+        save_dict[_STATE_DICT_METADATA_KEY] = metadata
     for key, value in state_dict.items():
         if isinstance(value, (Variable, core.eager.Tensor)):
             if value.type == core.VarDesc.VarType.VOCAB:
@@ -188,6 +192,19 @@ def _build_saved_state_dict(state_dict):
     save_dict["StructuredToParameterName@@"] = name_table
 
     return save_dict
+
+
+def _restore_state_dict_metadata(load_result):
+    if not isinstance(load_result, dict):
+        return load_result
+
+    metadata = load_result.pop(_STATE_DICT_METADATA_KEY, None)
+    if metadata is None:
+        return load_result
+
+    load_result = collections.OrderedDict(load_result)
+    load_result._metadata = metadata
+    return load_result
 
 
 def _load_state_dict_from_save_inference_model(model_path, config):
@@ -1277,6 +1294,7 @@ def load(path: str | BytesIO, **configs: Unpack[_LoadOptions]) -> Any:
                 # TODO(weixin):If `obj` is any object, the judgment condition should be more precise.
                 if isinstance(load_result, dict):
                     load_result = _pack_loaded_dict(load_result)
+                    load_result = _restore_state_dict_metadata(load_result)
                     # paddle2.0: paddle.save/load
                     if "StructuredToParameterName@@" in load_result:
                         for key, name in load_result[
@@ -1391,6 +1409,7 @@ def _legacy_load(path, **configs):
             with _open_file_buffer(path, 'rb') as f:
                 load_result = safe_load_pickle(f, encoding='latin1')
         load_result = _pack_loaded_dict(load_result)
+        load_result = _restore_state_dict_metadata(load_result)
         if (
             not config.keep_name_table
             and "StructuredToParameterName@@" in load_result

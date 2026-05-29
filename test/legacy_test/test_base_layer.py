@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import sys
+import tempfile
 import unittest
 from collections import OrderedDict
 
@@ -520,6 +521,56 @@ class TestStateDictHook(unittest.TestCase):
             self.assertEqual(
                 state_dict._metadata,
                 OrderedDict([("", {"version": 1}), ("child", {"version": 1})]),
+            )
+
+    def test_state_dict_metadata_save_load(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            child = paddle.nn.Layer()
+            child_parameter = child.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            child.register_parameter("weight", child_parameter)
+            layer.add_sublayer("child", child)
+
+            with tempfile.NamedTemporaryFile(suffix=".pdparams") as f:
+                paddle.save(layer.state_dict(), f.name)
+                state_dict = paddle.load(f.name)
+
+            self.assertEqual(
+                state_dict._metadata,
+                OrderedDict([("", {"version": 1}), ("child", {"version": 1})]),
+            )
+
+            pre_hook_calls = []
+
+            def load_state_dict_pre_hook(
+                layer,
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            ):
+                pre_hook_calls.append((layer, prefix, local_metadata))
+
+            layer.register_load_state_dict_pre_hook(load_state_dict_pre_hook)
+            child.register_load_state_dict_pre_hook(load_state_dict_pre_hook)
+            layer.load_state_dict(state_dict)
+
+            self.assertEqual(
+                pre_hook_calls,
+                [
+                    (layer, "", {"version": 1}),
+                    (child, "child.", {"version": 1}),
+                ],
             )
 
     def test_state_dict_plain_dict_destination(self):
