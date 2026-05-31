@@ -21,7 +21,7 @@ import warnings
 import weakref
 from collections import OrderedDict, namedtuple
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 import numpy as np
 from typing_extensions import Self, overload
@@ -86,7 +86,10 @@ _ForwardPostHook = Union[
 ]
 _StateDict = Union[dict[str, Tensor], typing.OrderedDict[str, Tensor]]
 _StateDictT = TypeVar("_StateDictT", bound=dict[str, Tensor])
-_StateDictHook = Callable[[_StateDict], None]
+_StateDictHook = Callable[[_StateDict], Optional[_StateDict]]
+_StateDictPostHook = Callable[
+    ["Layer", _StateDict, str, dict[str, Any]], Optional[_StateDict]
+]
 
 _first_cap_re = re.compile('(.)([A-Z][a-z]+)')
 _all_cap_re = re.compile('([a-z])([A-Z])')
@@ -681,7 +684,7 @@ class Layer:
         # only used in AMP Training
         self._cast_to_low_precision = True
 
-        self._state_dict_hooks: typing.OrderedDict[int, _StateDictHook] = (
+        self._state_dict_hooks: typing.OrderedDict[int, _StateDictPostHook] = (
             OrderedDict()
         )
         self._state_dict_pre_hooks = OrderedDict()
@@ -2654,16 +2657,57 @@ class Layer:
         self, hook: _StateDictHook
     ) -> HookRemoveHelper:
         hook_remove_helper = HookRemoveHelper(self._state_dict_hooks)
-        self._state_dict_hooks[hook_remove_helper._hook_id] = hook
+        self._state_dict_hooks[hook_remove_helper._hook_id] = (
+            self._wrap_state_dict_hook(hook)
+        )
         return hook_remove_helper
 
+    @overload
     def register_state_dict_post_hook(
-        self,
-        hook: Callable[
-            [Layer, _StateDict, str, dict[str, Any]], _StateDict | None
-        ],
+        self, hook: _StateDictHook
+    ) -> HookRemoveHelper: ...
+
+    @overload
+    def register_state_dict_post_hook(
+        self, hook: _StateDictPostHook
+    ) -> HookRemoveHelper: ...
+
+    def register_state_dict_post_hook(
+        self, hook: _StateDictHook | _StateDictPostHook
     ) -> HookRemoveHelper:
-        return self.register_state_dict_hook(hook)
+        hook_remove_helper = HookRemoveHelper(self._state_dict_hooks)
+        self._state_dict_hooks[hook_remove_helper._hook_id] = (
+            self._wrap_state_dict_hook(hook)
+        )
+        return hook_remove_helper
+
+    def _wrap_state_dict_hook(
+        self, hook: _StateDictHook | _StateDictPostHook
+    ) -> _StateDictPostHook:
+        try:
+            parameters = inspect.signature(hook).parameters
+        except (TypeError, ValueError):
+            return hook
+
+        has_varargs = any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL
+            for param in parameters.values()
+        )
+        positional_count = sum(
+            param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            for param in parameters.values()
+        )
+        if has_varargs or positional_count != 1:
+            return hook
+
+        def wrapped_hook(layer, destination, prefix, local_metadata):
+            return hook(destination)
+
+        return wrapped_hook
 
     def register_state_dict_pre_hook(self, hook: Callable[..., None]):
         hook_remove_helper = HookRemoveHelper(self._state_dict_pre_hooks)
@@ -2778,8 +2822,11 @@ class Layer:
                     )
 
         if use_hook:
+            local_metadata = {}
             for state_dict_hook in self._state_dict_hooks.values():
-                hook_result = state_dict_hook(destination)
+                hook_result = state_dict_hook(
+                    self, destination, structured_name_prefix, local_metadata
+                )
                 if hook_result is not None:
                     destination = hook_result
 
@@ -2941,7 +2988,7 @@ class Layer:
                 structured_name_prefix=kwargs.get('prefix', ""),
                 include_non_persistable_buffer=False,
                 use_hook=True,
-                keep_vars=kwargs.get('keep_vars', False),
+                keep_vars=kwargs.get('keep_vars', not in_dygraph_mode()),
             )
 
         return self._state_dict_impl(*args, **kwargs)

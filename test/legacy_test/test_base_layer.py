@@ -348,6 +348,34 @@ class TestStateDictHook(unittest.TestCase):
                 hook_remove_helper._hook_id, layer._state_dict_hooks
             )
 
+    def test_state_dict_post_hook_with_module_args(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            hook_calls = []
+
+            def state_dict_post_hook(
+                layer, destination, prefix, local_metadata
+            ):
+                hook_calls.append((layer, destination, prefix, local_metadata))
+                destination["post_hook_weight"] = destination.pop("weight")
+
+            hook_remove_helper = layer.register_state_dict_post_hook(
+                state_dict_post_hook
+            )
+            state_dict = layer.state_dict()
+            self.assertIn("post_hook_weight", state_dict)
+            self.assertNotIn("weight", state_dict)
+            self.assertEqual(hook_calls, [(layer, state_dict, "", {})])
+            hook_remove_helper.remove()
+            self.assertNotIn(
+                hook_remove_helper._hook_id, layer._state_dict_hooks
+            )
+
     def test_load_state_dict_hooks(self):
         with base.dygraph.guard():
             layer = paddle.nn.Layer()
