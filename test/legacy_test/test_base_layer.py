@@ -13,6 +13,7 @@
 # limitations under the License.
 import sys
 import unittest
+from collections import OrderedDict
 
 import numpy as np
 from op_test import get_device, get_device_place, is_custom_device
@@ -347,6 +348,34 @@ class TestStateDictHook(unittest.TestCase):
                 hook_remove_helper._hook_id, layer._state_dict_hooks
             )
 
+    def test_state_dict_post_hook_with_module_args(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            hook_calls = []
+
+            def state_dict_post_hook(
+                layer, destination, prefix, local_metadata
+            ):
+                hook_calls.append((layer, destination, prefix, local_metadata))
+                destination["post_hook_weight"] = destination.pop("weight")
+
+            hook_remove_helper = layer.register_state_dict_post_hook(
+                state_dict_post_hook
+            )
+            state_dict = layer.state_dict()
+            self.assertIn("post_hook_weight", state_dict)
+            self.assertNotIn("weight", state_dict)
+            self.assertEqual(hook_calls, [(layer, state_dict, "", {})])
+            hook_remove_helper.remove()
+            self.assertNotIn(
+                hook_remove_helper._hook_id, layer._state_dict_hooks
+            )
+
     def test_load_state_dict_hooks(self):
         with base.dygraph.guard():
             layer = paddle.nn.Layer()
@@ -365,7 +394,6 @@ class TestStateDictHook(unittest.TestCase):
             pre_hook_calls = []
             post_hook_calls = []
             child_pre_hook_calls = []
-            child_post_hook_calls = []
 
             def load_state_dict_pre_hook(
                 layer,
@@ -397,9 +425,7 @@ class TestStateDictHook(unittest.TestCase):
                 post_hook_calls.append((layer, incompatible_keys.missing_keys))
 
             def child_load_state_dict_post_hook(layer, incompatible_keys):
-                child_post_hook_calls.append(
-                    (layer, incompatible_keys.missing_keys)
-                )
+                post_hook_calls.append((layer, incompatible_keys.missing_keys))
 
             pre_hook = layer.register_load_state_dict_pre_hook(
                 load_state_dict_pre_hook
@@ -415,10 +441,12 @@ class TestStateDictHook(unittest.TestCase):
             )
 
             incompatible_keys = layer.load_state_dict(
-                {
-                    "weight": paddle.ones_like(parameter),
-                    "child.weight": paddle.ones_like(child_parameter),
-                },
+                OrderedDict(
+                    {
+                        "weight": paddle.ones_like(parameter),
+                        "child.weight": paddle.ones_like(child_parameter),
+                    }
+                ),
                 strict=True,
             )
             self.assertEqual(incompatible_keys.missing_keys, [])
@@ -427,8 +455,7 @@ class TestStateDictHook(unittest.TestCase):
             self.assertEqual(
                 child_pre_hook_calls, [(child, "child.", {}, True)]
             )
-            self.assertEqual(post_hook_calls, [(layer, [])])
-            self.assertEqual(child_post_hook_calls, [(child, [])])
+            self.assertEqual(post_hook_calls, [(child, []), (layer, [])])
 
             pre_hook.remove()
             post_hook.remove()
@@ -446,6 +473,102 @@ class TestStateDictHook(unittest.TestCase):
             self.assertNotIn(
                 child_post_hook._hook_id, child._load_state_dict_post_hooks
             )
+
+    def test_load_state_dict_metadata(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            child = paddle.nn.Layer()
+            child_parameter = child.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            child.register_parameter("weight", child_parameter)
+            layer.add_sublayer("child", child)
+
+            pre_hook_calls = []
+
+            def load_state_dict_pre_hook(
+                layer,
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            ):
+                pre_hook_calls.append((layer, prefix, local_metadata))
+
+            layer.register_load_state_dict_pre_hook(load_state_dict_pre_hook)
+            child.register_load_state_dict_pre_hook(load_state_dict_pre_hook)
+
+            state_dict = OrderedDict(
+                {
+                    "weight": paddle.ones_like(parameter),
+                    "child.weight": paddle.ones_like(child_parameter),
+                }
+            )
+            state_dict._metadata = OrderedDict(
+                [("", {"version": 1}), ("child", {"version": 2})]
+            )
+            incompatible_keys = layer.load_state_dict(
+                state_dict,
+                strict=True,
+            )
+            self.assertEqual(incompatible_keys.missing_keys, [])
+            self.assertEqual(incompatible_keys.unexpected_keys, [])
+            self.assertEqual(
+                pre_hook_calls,
+                [
+                    (layer, "", {"version": 1}),
+                    (child, "child.", {"version": 2}),
+                ],
+            )
+
+    def test_state_dict_metadata(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            child = paddle.nn.Layer()
+            child_parameter = child.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            child.register_parameter("weight", child_parameter)
+            layer.add_sublayer("child", child)
+
+            state_dict = layer.state_dict()
+            self.assertEqual(
+                state_dict._metadata,
+                OrderedDict([("", {"version": 1}), ("child", {"version": 1})]),
+            )
+
+    def test_state_dict_plain_dict_destination(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            parameter = layer.create_parameter(
+                shape=[1], dtype='float32', is_bias=False
+            )
+            layer.register_parameter("weight", parameter)
+
+            destination = {}
+            state_dict = layer.state_dict(destination=destination)
+            self.assertIs(state_dict, destination)
+            self.assertIn("weight", state_dict)
+            self.assertFalse(hasattr(state_dict, "_metadata"))
+
+    def test_load_state_dict_requires_mapping(self):
+        with base.dygraph.guard():
+            layer = paddle.nn.Layer()
+            with self.assertRaisesRegex(TypeError, "dict-like"):
+                layer.load_state_dict([])
 
     def test_load_state_dict_post_hook_return(self):
         with base.dygraph.guard():

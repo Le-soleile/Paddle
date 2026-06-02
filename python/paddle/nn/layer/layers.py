@@ -20,7 +20,8 @@ import typing
 import warnings
 import weakref
 from collections import OrderedDict, namedtuple
-from typing import TYPE_CHECKING, Any, Callable, Union
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 import numpy as np
 from typing_extensions import Self, overload
@@ -64,7 +65,7 @@ from paddle.utils.decorator_utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from paddle._typing import DTypeLike, ParamAttrLike, PlaceLike, ShapeLike
     from paddle.nn.initializer import Initializer
@@ -84,7 +85,11 @@ _ForwardPostHook = Union[
     Callable[["Layer", Tensor, dict[str, Any], Tensor], Tensor],
 ]
 _StateDict = Union[dict[str, Tensor], typing.OrderedDict[str, Tensor]]
-_StateDictHook = Callable[[_StateDict], None]
+_StateDictT = TypeVar("_StateDictT", bound=dict[str, Tensor])
+_StateDictHook = Callable[[_StateDict], Optional[_StateDict]]
+_StateDictPostHook = Callable[
+    ["Layer", _StateDict, str, dict[str, Any]], Optional[_StateDict]
+]
 
 _first_cap_re = re.compile('(.)([A-Z][a-z]+)')
 _all_cap_re = re.compile('([a-z])([A-Z])')
@@ -679,7 +684,7 @@ class Layer:
         # only used in AMP Training
         self._cast_to_low_precision = True
 
-        self._state_dict_hooks: typing.OrderedDict[int, _StateDictHook] = (
+        self._state_dict_hooks: typing.OrderedDict[int, _StateDictPostHook] = (
             OrderedDict()
         )
         self._state_dict_pre_hooks = OrderedDict()
@@ -2154,7 +2159,7 @@ class Layer:
     def backward(self, *inputs: Any) -> Any:
         raise ValueError("Layer shouldn't implement backward")
 
-    def add_sublayer(self, name: str, sublayer: Layer) -> Layer:
+    def add_sublayer(self, name: str, sublayer: Layer | None) -> Layer | None:
         """
 
         Adds a sub Layer instance.
@@ -2194,8 +2199,6 @@ class Layer:
                 0 Linear(in_features=10, out_features=3, dtype=float32)
                 1 Linear(in_features=3, out_features=10, dtype=float32)
         """
-        assert isinstance(sublayer, Layer) or sublayer is None
-
         self._sub_layers[name] = sublayer
         return sublayer
 
@@ -2641,13 +2644,57 @@ class Layer:
         self, hook: _StateDictHook
     ) -> HookRemoveHelper:
         hook_remove_helper = HookRemoveHelper(self._state_dict_hooks)
-        self._state_dict_hooks[hook_remove_helper._hook_id] = hook
+        self._state_dict_hooks[hook_remove_helper._hook_id] = (
+            self._wrap_state_dict_hook(hook)
+        )
         return hook_remove_helper
 
+    @overload
     def register_state_dict_post_hook(
         self, hook: _StateDictHook
+    ) -> HookRemoveHelper: ...
+
+    @overload
+    def register_state_dict_post_hook(
+        self, hook: _StateDictPostHook
+    ) -> HookRemoveHelper: ...
+
+    def register_state_dict_post_hook(
+        self, hook: _StateDictHook | _StateDictPostHook
     ) -> HookRemoveHelper:
-        return self.register_state_dict_hook(hook)
+        hook_remove_helper = HookRemoveHelper(self._state_dict_hooks)
+        self._state_dict_hooks[hook_remove_helper._hook_id] = (
+            self._wrap_state_dict_hook(hook)
+        )
+        return hook_remove_helper
+
+    def _wrap_state_dict_hook(
+        self, hook: _StateDictHook | _StateDictPostHook
+    ) -> _StateDictPostHook:
+        try:
+            parameters = inspect.signature(hook).parameters
+        except (TypeError, ValueError):
+            return hook
+
+        has_varargs = any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL
+            for param in parameters.values()
+        )
+        positional_count = sum(
+            param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            for param in parameters.values()
+        )
+        if has_varargs or positional_count != 1:
+            return hook
+
+        def wrapped_hook(layer, destination, prefix, local_metadata):
+            return hook(destination)
+
+        return wrapped_hook
 
     def register_state_dict_pre_hook(self, hook: Callable[..., None]):
         hook_remove_helper = HookRemoveHelper(self._state_dict_pre_hooks)
@@ -2719,6 +2766,13 @@ class Layer:
 
         if destination is None:
             destination = OrderedDict()
+        if not hasattr(destination, '_metadata'):
+            try:
+                destination._metadata = OrderedDict()
+            except Exception:
+                pass
+        if hasattr(destination, '_metadata'):
+            destination._metadata[structured_name_prefix[:-1]] = {'version': 1}
         if use_hook:
             for state_dict_pre_hook in self._state_dict_pre_hooks.values():
                 state_dict_pre_hook(self, structured_name_prefix, keep_vars)
@@ -2755,8 +2809,11 @@ class Layer:
                     )
 
         if use_hook:
+            local_metadata = {}
             for state_dict_hook in self._state_dict_hooks.values():
-                hook_result = state_dict_hook(destination)
+                hook_result = state_dict_hook(
+                    self, destination, structured_name_prefix, local_metadata
+                )
                 if hook_result is not None:
                     destination = hook_result
 
@@ -2806,18 +2863,52 @@ class Layer:
     @overload
     def state_dict(
         self,
-        destination: _StateDict | None = None,
-        include_sublayers: bool = True,
-        structured_name_prefix: str = "",
-        use_hook: bool = True,
-        keep_vars: bool = True,
+        destination: _StateDictT,
+        include_sublayers: bool = ...,
+        structured_name_prefix: str = ...,
+        use_hook: bool = ...,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: None = ...,
+        include_sublayers: bool = ...,
+        structured_name_prefix: str = ...,
+        use_hook: bool = ...,
+        keep_vars: bool = ...,
     ) -> _StateDict: ...
 
     @overload
     def state_dict(
         self,
+        destination: _StateDictT,
+        prefix: str,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: None,
+        prefix: str,
+        keep_vars: bool = ...,
+    ) -> _StateDict: ...
+
+    @overload
+    def state_dict(
+        self,
+        destination: _StateDictT,
         *,
-        destination: _StateDict,
+        prefix: str = ...,
+        keep_vars: bool = ...,
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self,
+        *,
         prefix: str = ...,
         keep_vars: bool = ...,
     ) -> _StateDict: ...
@@ -2826,13 +2917,18 @@ class Layer:
     def state_dict(
         self,
         *,
+        destination: _StateDictT,
         prefix: str = ...,
         keep_vars: bool = ...,
-    ) -> _StateDict: ...
+    ) -> _StateDictT: ...
 
     @overload
     def state_dict(
-        self, *args, destination=None, prefix="", keep_vars=False
+        self,
+        *,
+        destination: None = ...,
+        prefix: str = ...,
+        keep_vars: bool = ...,
     ) -> _StateDict: ...
 
     def state_dict(self, *args: Any, **kwargs: Any) -> _StateDict:
@@ -3126,45 +3222,51 @@ class Layer:
                 * ``unexpected_keys`` is a list of str containing the keys that are not
                     expected by this module but present in the provided ``state_dict``.
         """
+        if not isinstance(state_dict, Mapping):
+            raise TypeError("Expected state_dict to be dict-like")
+        metadata = getattr(state_dict, "_metadata", None)
         error_msgs: list[str] = []
         missing_keys: list[str] = []
         unexpected_keys: list[str] = []
 
-        def visit_load_state_dict_hooks(layer, prefix, is_post_hook=False):
-            if is_post_hook:
-                incompatible_keys = _IncompatibleKeys(
-                    missing_keys, unexpected_keys
+        def visit_load_state_dict_pre_hooks(layer, prefix):
+            local_metadata: dict[str, Any] = (
+                {} if metadata is None else metadata.get(prefix[:-1], {})
+            )
+            for hook in layer._load_state_dict_pre_hooks.values():
+                hook(
+                    layer,
+                    state_dict,
+                    prefix,
+                    local_metadata,
+                    strict,
+                    missing_keys,
+                    unexpected_keys,
+                    error_msgs,
                 )
-                for hook in layer._load_state_dict_post_hooks.values():
-                    hook_result = hook(layer, incompatible_keys)
-                    if hook_result is not None:
-                        raise AssertionError(
-                            "Hooks registered with ``register_load_state_dict_post_hook`` are not"
-                            "expected to return new values, if incompatible_keys need to be modified,"
-                            "it should be done inplace."
-                        )
-            else:
-                local_metadata: dict[str, Any] = {}
-                for hook in layer._load_state_dict_pre_hooks.values():
-                    hook(
-                        layer,
-                        state_dict,
-                        prefix,
-                        local_metadata,
-                        strict,
-                        missing_keys,
-                        unexpected_keys,
-                        error_msgs,
-                    )
             for layer_name, layer_item in layer._sub_layers.items():
                 if layer_item is not None:
-                    visit_load_state_dict_hooks(
-                        layer_item,
-                        prefix + layer_name + ".",
-                        is_post_hook,
+                    visit_load_state_dict_pre_hooks(
+                        layer_item, prefix + layer_name + "."
                     )
 
-        visit_load_state_dict_hooks(self, "")
+        def visit_load_state_dict_post_hooks(layer, prefix):
+            for layer_name, layer_item in layer._sub_layers.items():
+                if layer_item is not None:
+                    visit_load_state_dict_post_hooks(
+                        layer_item, prefix + layer_name + "."
+                    )
+            incompatible_keys = _IncompatibleKeys(missing_keys, unexpected_keys)
+            for hook in layer._load_state_dict_post_hooks.values():
+                hook_result = hook(layer, incompatible_keys)
+                if hook_result is not None:
+                    raise AssertionError(
+                        "Hooks registered with ``register_load_state_dict_post_hook`` are not "
+                        "expected to return new values, if incompatible_keys need to be modified, "
+                        "it should be done inplace."
+                    )
+
+        visit_load_state_dict_pre_hooks(self, "")
 
         load_missing_keys, load_unexpected_keys = self.set_state_dict(
             state_dict, use_structured_name=True
@@ -3172,7 +3274,7 @@ class Layer:
         missing_keys.extend(load_missing_keys)
         unexpected_keys.extend(load_unexpected_keys)
 
-        visit_load_state_dict_hooks(self, "", is_post_hook=True)
+        visit_load_state_dict_post_hooks(self, "")
 
         if strict:
             if len(unexpected_keys) > 0:
