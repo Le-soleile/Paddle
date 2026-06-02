@@ -1515,13 +1515,13 @@ class TestModuleDictEdgeCases(unittest.TestCase):
         module_dict = nn.ModuleDict()
         module_dict['key-with-dash'] = nn.Linear(5, 3)
         module_dict['key_with_underscore'] = nn.ReLU()
-        with self.assertRaisesRegex(KeyError, "module name cannot contain"):
-            module_dict['key.with.dots'] = nn.Sigmoid()
+        module_dict['key.with.dots'] = nn.Sigmoid()
         module_dict['123numeric'] = nn.Tanh()
 
-        self.assertEqual(len(module_dict), 3)
+        self.assertEqual(len(module_dict), 4)
         self.assertIn('key-with-dash', module_dict)
         self.assertIn('key_with_underscore', module_dict)
+        self.assertIn('key.with.dots', module_dict)
         self.assertIn('123numeric', module_dict)
 
     def test_module_dict_with_none(self):
