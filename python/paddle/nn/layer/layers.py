@@ -2988,7 +2988,7 @@ class Layer:
                 structured_name_prefix=kwargs.get('prefix', ""),
                 include_non_persistable_buffer=False,
                 use_hook=True,
-                keep_vars=kwargs.get('keep_vars', not in_dygraph_mode()),
+                keep_vars=kwargs.get('keep_vars', False),
             )
 
         return self._state_dict_impl(*args, **kwargs)
