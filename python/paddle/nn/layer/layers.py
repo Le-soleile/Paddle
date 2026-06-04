@@ -2848,7 +2848,7 @@ class Layer:
             destination(dict, optional) : If provide, all the parameters and persistable buffers will be set to this dict . Default: None.
             include_sublayers(bool, optional) : If true, also include the parameters and persistable buffers from sublayers. Default: True.
             use_hook(bool, optional) : If true, the operations contained in _state_dict_hooks will be appended to the destination. Default: True.
-            keep_vars(bool, optional) : If false, the returned tensors in the state dict are detached from autograd. Default: True.
+            keep_vars(bool, optional) : If false, the returned tensors in the state dict are detached from autograd. Default: False.
 
         Returns:
             dict, a dict contains all the parameters and persistable buffers.
@@ -2975,9 +2975,20 @@ class Layer:
                 raise TypeError(f"got multiple values for argument '{key}'")
             kwargs[key] = value
 
-        if (
-            len_args >= 2 and isinstance(args[1], str)
-        ) or 'prefix' in kwargs:  # Torch API
+        if len_args >= 2 and isinstance(args[1], bool):
+            return self._state_dict_impl(*args, **kwargs)
+
+        if any(
+            key in kwargs
+            for key in [
+                'include_sublayers',
+                'structured_name_prefix',
+                'use_hook',
+            ]
+        ):
+            return self._state_dict_impl(*args, **kwargs)
+
+        if len_args <= 3:
             base_param_keys = ["destination", "prefix", "keep_vars"]
             for idx in range(min(len_args, len(base_param_keys))):
                 safe_set_param(base_param_keys[idx], args[idx])
